@@ -25,6 +25,7 @@
 #  Loic Dachary <loic@dachary.org>
 #
 # 
+import numpy as np
 import sys
 _pokereval = __import__('_pokereval_' + sys.version[0] + '_' + sys.version[2])
 
@@ -129,6 +130,17 @@ Return the strength of the "cards" as a number. The higher the
 better.
 """
         return _pokereval.evaln(cards)
+
+    def evaln_vector(self, hands):
+        return _pokereval.evaln_vector(hands)
+
+    def rank_suit_arr(self, hands, rank_counter_map, board_len, num_hole_cards):
+        return _pokereval.rank_suit_arr(hands, rank_counter_map, board_len, num_hole_cards)
+
+    def phs(self, distro):
+        def _percentiles(data):
+            return np.searchsorted(np.sort(data), data, side='right') / len(data) * 100
+        return _percentiles(distro)
     
     def winners(self, *args, **kwargs):
         """\

@@ -7,6 +7,7 @@ import os
 from distutils import core
 from distutils.core import Extension
 from distutils.command.build_ext import build_ext
+import numpy
 
 
 def read_file(name):
@@ -34,7 +35,7 @@ core.setup(
         Extension(
             C_NAME,
             ['pypokereval.c'],
-            include_dirs = ['include', '/usr/local/include/poker-eval', '/usr/include/poker-eval'],
+            include_dirs = ['include', '/usr/local/include/poker-eval', '/usr/include/poker-eval'] + [numpy.get_include()],
             libraries = ['poker-eval'],
             define_macros = [
                 ('PYTHON_VERSION', '"%s"' % PYTHON_VERSION),

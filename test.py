@@ -24,8 +24,10 @@
 # Authors:
 #  Loic Dachary <loic@dachary.org>
 #
-# 
+#
+import itertools
 import sys
+import numpy as np
 sys.path.insert(0, ".")
 sys.path.insert(0, ".libs")
 
@@ -59,6 +61,8 @@ print("winners = %s\n" % pokereval.winners(game = "holdem", pockets = [ ["tc", "
 
 print("result = %s\n" % pokereval.poker_eval(game = "holdem", pockets = [ ["tc", "ac"],  ["th", "ah"],  ["8c", "6h"]], dead = [], board = ["7h", "3s", "2c", "7s", "7d"]))
 print("winners = %s\n" % pokereval.winners(game = "holdem", pockets = [ ["tc", "ac"],  ["th", "ah"],  ["8c", "6h"]], dead = [], board = ["7h", "3s", "2c", "7s", "7d"]))
+
+print("result omaha = %s\n" % pokereval.poker_eval(game = "omaha", pockets = [ ["2c", "ac", "4s", "3s"],  [255, 255, 255, 255]], dead = [], board = ["7h", "6s", "2d", "7s", "7d"]))
 
 print("winners (filthy pockets) = %s\n" % pokereval.winners(game = "holdem", pockets = [ ["tc", "ac", 255],  [], [255, 255], ["th", "ah"],  ["8c", "6h"]], dead = [], board = ["7h", "3s", "2c", "7s", "7d"]))
 
@@ -168,11 +172,23 @@ if len(sys.argv) > 2:
     print("f7 result = %s\n" % pokereval.poker_eval(game = "omaha", fill_pockets = 1, iterations = iterations_high, pockets = [ ["Js", "Jc", "7s", "8c"],  ["__", "__", "__", "__"],  ["__", "__", "__", "__"]], dead = [], board = ["__", "__", "__", "__", "__"]))
 
 print("")
-hand = ['As', 'Ad']
+hand = ['As', 'Ad', 'Ah', 'Kc', 'Kh', 'Kd', '7c']
 print("handval %s = %d " % (hand, pokereval.evaln(hand)))
 
-print("")
-hand = ['Qc', '7d']
-print("handval %s = %d " % (hand, pokereval.evaln(hand)))
+_NUM_RANKS = 13
+RANK_COUNTER_MAP = {}
+def _rank_counter_map(board_len):
+  return {tuple(rank_arr): i for i, rank_arr in enumerate(list(itertools.combinations_with_replacement(range(_NUM_RANKS - 1, -1, -1), board_len)))}
+
+for board_len in (9,):
+  RANK_COUNTER_MAP.update(_rank_counter_map(board_len))
+
+
+hands = np.array([[51, 37, 25, 12, 31, 24, 20, 11, 1], [51, 25, 12, 1, 20, 19, 4, 3, 2]], dtype=np.int32)
+print(pokereval.card2string([51, 37, 25, 12, 31, 24, 20, 11, 1]))
+print(pokereval.card2string([51, 25, 12, 1, 20, 19, 4, 3, 2]))
+print(pokereval.rank_suit_arr(hands, RANK_COUNTER_MAP))
+
+print(pokereval.phs(np.array([1, 4, 2, 2, 2, 2, 3, 5])))
 
 pokereval = None

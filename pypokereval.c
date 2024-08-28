@@ -36,6 +36,8 @@
 #endif
 #include <bytesobject.h>
 
+#include <numpy/arrayobject.h>
+
 #if PY_MAJOR_VERSION >= 3
  #define IS_PY3K
 #endif
@@ -67,6 +69,7 @@ struct module_state {
    Michael Maurer, Apr 2002
 */
 
+#include <stdlib.h>
 #include "poker_defs.h"
 #include "inlines/eval.h"
 #include "inlines/eval_low.h"
@@ -226,7 +229,7 @@ struct module_state {
     StdDeck_CardMask_RESET(_finalBoard);				\
     StdDeck_CardMask_OR(_finalBoard, board, cardsDealt[0]);		\
     StdDeck_CardMask_OR(_hand, pockets[i], cardsDealt[i + 1]);		\
-    err = StdDeck_OmahaHiLow8_EVAL(_hand, _finalBoard,                  \
+    err = StdDeck_OmahaHiLow8_EVAL_LUT(_hand, _finalBoard,                  \
                                    &hival[i], NULL);			\
     loval[i] = LowHandVal_NOTHING;					\
   })
@@ -477,7 +480,6 @@ static int PyList2CardMask(PyObject* object, CardMask* cardsp)
     PyErr_SetString(PyExc_TypeError, "expected a list of cards");
     return -1;
   }
-
   valid_cards_size = cards_size = PyList_Size(object);
   CardMask_RESET(cards);
 
@@ -486,8 +488,10 @@ static int PyList2CardMask(PyObject* object, CardMask* cardsp)
   for(i = 0; i < cards_size; i++) {
     card = -1;
     PyObject* pycard = PyList_GetItem(object, i);
-    if(PyErr_Occurred())
+    if(PyErr_Occurred()) {
+      Py_DECREF(pycard);
       return -1;
+    }
 #ifdef IS_PY3K
     if(PyUnicode_Check(pycard)) {
       PyObject * temp_bytes = PyUnicode_AsEncodedString(pycard, "ASCII", "strict");
@@ -503,18 +507,21 @@ static int PyList2CardMask(PyObject* object, CardMask* cardsp)
 	card = 255;
       } else {
 	if(Deck_stringToCard(card_string, &card) == 0) {
-	  PyErr_Format(PyExc_RuntimeError, "card %s is not a valid card name", card_string);
-	  return -1;
+	 // PyErr_Format(PyExc_RuntimeError, "card %s is not a valid card name", card_string);
+	 return -1;
 	}
+  free(card_string);
       }
     } else if(PyInteger_Check(pycard)) {
       card = PyInteger_AsLong(pycard);
       if(card != NOCARD && (card < 0 || card > StdDeck_N_CARDS)) {
 	PyErr_Format(PyExc_TypeError, "card value (%d) must be in the range [0-%d]", card, StdDeck_N_CARDS);
+  Py_DECREF(pycard);
 	return -1;
       }
     } else {
       PyErr_SetString(PyExc_TypeError, "card must be a string or an int");
+      Py_DECREF(pycard);
       return -1;
     }
 
@@ -568,10 +575,9 @@ poker_evaln(PyObject* self, PyObject *args)
     return NULL;
 
   if(PyList2CardMask(pycards, &cards) < 0)
-    return NULL;
+    return Py_BuildValue("i", -1);
 
   handval = Hand_EVAL_N(cards, PyList_Size(pycards));
-
   return Py_BuildValue("i", handval);
 }
 
@@ -1098,12 +1104,257 @@ err:
   return result;
 }
 
+static char doc_rank_suit_arr[] =
+"converts a hand to an array of ranks and suits";
+
+int cmp (const void * a, const void * b) {
+  return ( *(int*)b - *(int*)a );
+}
+
+// _PSIM_SUITS = {
+//   0: 'h', 1: 'd', 2: 'c', 3: 's'
+// }
+// _NANITERU_SUITS = {
+//   's': 3, 'h': 2, 'd': 1, 'c': 0
+// }
+
+int cmp_by_naniteru (const void * a, const void * b) {
+  int card_a = *(int *)a;
+  int card_b = *(int *)b;
+  int rank_a = card_a % 13;
+  int rank_b = card_b % 13;
+  int suit_a = card_a / 13;
+  int suit_b = card_b / 13;
+  if (suit_a == 2) {
+    suit_a = 0;
+  } else if (suit_a == 0) {
+    suit_a = 2;
+  }
+  if (suit_b == 2) {
+    suit_b = 0;
+  } else if (suit_b == 0) {
+    suit_b = 2;
+  }
+  int naniteru_a = rank_a * 4 + suit_a;
+  int naniteru_b = rank_b * 4 + suit_b;
+  return ( naniteru_b - naniteru_a );
+}
+
+static PyObject*
+rank_suit_arr(PyObject* self, PyObject *args)
+{
+  CardMask cards;
+  PyArrayObject *hands;
+  PyObject *rank_counter_map;
+  PyObject *result;
+  int board_len;
+  int num_hole_cards;
+  if (!PyArg_ParseTuple(args, "O!O!ii", &PyArray_Type, &hands, &PyDict_Type, &rank_counter_map, &board_len, &num_hole_cards)) {
+    return NULL;
+  }
+
+  npy_intp num_hands = PyArray_DIM(hands, 0);
+  npy_intp num_cards = PyArray_DIM(hands, 1);
+  PyArrayObject *ranks = (PyArrayObject*) PyArray_SimpleNew(2, PyArray_DIMS(hands), NPY_INT);
+  if (!ranks) return NULL;
+  PyArrayObject *suits = (PyArrayObject*) PyArray_SimpleNew(2, PyArray_DIMS(hands), NPY_INT);
+  if (!suits) return NULL;
+
+  PyArrayObject *rank_counters = (PyArrayObject*) PyArray_SimpleNew(1, &num_hands, NPY_INT);
+  if (!rank_counters) return NULL;
+  PyArrayObject *suit_counters = (PyArrayObject*) PyArray_SimpleNew(1, &num_hands, NPY_INT);
+  if (!suit_counters) return NULL;
+
+  int *ranks_data = (int*) PyArray_DATA(ranks);
+  int *suits_data = (int*) PyArray_DATA(suits);
+  int *rank_counters_data = (int*) PyArray_DATA(rank_counters);
+  int *suit_counters_data = (int*) PyArray_DATA(suit_counters);
+
+  result = PyTuple_New(4);
+  // int *ranks_ = malloc(board_len * sizeof(int));
+  int *naniteru_ = malloc(board_len * sizeof(int));
+  PyObject *rank_counter_key = PyTuple_New(num_cards);
+  for (npy_intp i = 0; i < num_hands; i++) {
+    int suit_counter = 0;
+    int suit_tallies[4] = {0, 0, 0, 0};
+    int major_suit = -1;
+    for (npy_intp j = num_hole_cards; j < num_cards; j++) {
+      int value = (int) *(uint*)PyArray_GetPtr(hands, (npy_intp[]){i, j});
+      int suit = value / 13;
+      suit_tallies[suit] += 1;
+    }
+    for (int s = 0; s < 4; s++) {
+      if (suit_tallies[s] >= 3) {
+        major_suit = s;
+      }
+    }
+    CardMask_RESET(cards);
+    int is_invalid = 0;
+
+    for (npy_intp j = 0; j < num_cards; j++) {
+      naniteru_[j] = (int) *(uint*)PyArray_GetPtr(hands, (npy_intp[]){i, j});
+    }
+    qsort(naniteru_, num_hole_cards, sizeof(int), cmp_by_naniteru);
+    qsort(naniteru_ + num_hole_cards, board_len - num_hole_cards, sizeof(int), cmp_by_naniteru);
+
+    for (npy_intp j = 0; j < num_cards; j++) {
+      int value = naniteru_[j];
+      int rank = value % 13;
+      ranks_data[i * num_cards + j] = rank;
+
+      if (CardMask_CARD_IS_SET(cards, value)) {
+        is_invalid = 1;
+      }
+
+      int suit = value / 13;
+      int is_major = 0;
+      if (suit == major_suit) {
+        suit_counter += (1 << (num_cards - j - 1));
+        is_major = 1;
+      }
+      suits_data[i * num_cards + j] = is_major;
+      CardMask_SET(cards, value);
+    }
+    if (is_invalid) {
+      suit_counter = 1;
+    }
+    // qsort(ranks_, num_hole_cards, sizeof(int), cmp);
+    // qsort(ranks_ + num_hole_cards, board_len - num_hole_cards, sizeof(int), cmp);
+    for (npy_intp j = 0; j < num_cards; j++) {
+      int rank = naniteru_[j] % 13;
+      PyTuple_SetItem(rank_counter_key, j, PyLong_FromLong(rank));
+    }
+    if (suit_counter != 1) {
+      suit_counter = suit_counter << 1;
+    }
+    suit_counters_data[i] = suit_counter;
+    PyObject *item = PyDict_GetItem(rank_counter_map, rank_counter_key);
+    rank_counters_data[i] = PyLong_AsLong(item);
+  }
+
+  PyTuple_SetItem(result, 0, PyArray_Return(ranks));
+  PyTuple_SetItem(result, 1, PyArray_Return(suits));
+  PyTuple_SetItem(result, 2, PyArray_Return(rank_counters));
+  PyTuple_SetItem(result, 3, PyArray_Return(suit_counters));
+
+  // free(ranks_);
+  free(naniteru_);
+  return result;
+}
+
+static char doc_phs[] =
+"given array of all hand evals, return the percentile hand strength";
+
+// Define a structure to store value and its original index
+typedef struct {
+    int value;
+    int index;
+} Element;
+
+int cmp_elem(const void *a, const void *b) {
+  return ((Element *)a)->value - ((Element *)b)->value;
+}
+
+static PyObject*
+phs(PyObject* self, PyObject *args)
+{
+  PyArrayObject *distro;
+  PyObject *result;
+  if (!PyArg_ParseTuple(args, "O!", &PyArray_Type, &distro)) {
+    return NULL;
+  }
+
+  npy_intp num_hands = PyArray_DIM(distro, 0);
+
+  result = (PyArrayObject*) PyArray_SimpleNew(1, &num_hands, NPY_INT);
+  if (!result) return NULL;
+
+  int *result_data = (int*) PyArray_DATA(result);
+
+  Element *elements = malloc(num_hands * sizeof(Element));
+  if (elements == NULL) {
+    return NULL;
+  }
+
+  // Initialize the elements array.
+  for (npy_intp i = 0; i < num_hands; i++) {
+    npy_intp dims[1] = {i};
+    elements[i].value = *(int *)PyArray_GetPtr(distro, dims);
+    elements[i].index = i;
+  }
+
+  // Sort elements by value.
+  qsort(elements, num_hands, sizeof(Element), cmp_elem);
+
+  // Create a map from the sorted position to the original index.
+  for (npy_intp i = 0; i < num_hands; i++) {
+    result_data[elements[i].index] = i;
+  }
+
+  free(elements);
+  return PyArray_Return(result);
+}
+
+
+
+static char doc_poker_evaln_vector[] =
+"EvalNVector";
+
+static PyObject*
+poker_evaln_vector(PyObject* self, PyObject *args)
+{
+  PyArrayObject *hands, *result;
+  if (!PyArg_ParseTuple(args, "O!", &PyArray_Type, &hands)) {
+    return NULL;
+  }
+
+  npy_intp num_hands = PyArray_DIM(hands, 0);
+  npy_intp num_cards = PyArray_DIM(hands, 1);
+  result = (PyArrayObject*) PyArray_SimpleNew(1, &num_hands, NPY_UINT);
+  if (!result) return NULL;
+
+  int *result_data = (int*) PyArray_DATA(result);
+
+  // Board is the same for all hands.
+  CardMask board;
+  CardMask_RESET(board);
+  for (npy_intp j = 4; j < num_cards; j++) {
+    int value = (int) *(uint*)PyArray_GetPtr(hands, (npy_intp[]){0, j});
+    CardMask_SET(board, value);
+  }
+
+  for (npy_intp i = 0; i < num_hands; i++) {
+    CardMask hand;
+    CardMask_RESET(hand);
+
+    for (npy_intp j = 0; j < 4; j++) {
+      int value = (int) *(uint*)PyArray_GetPtr(hands, (npy_intp[]){i, j});
+      CardMask_SET(hand, value);
+    }
+
+    CardMask hicards;
+    CardMask locards;
+    HandVal  hival = 0;
+    StdDeck_CardMask_RESET(hicards);
+    StdDeck_CardMask_RESET(locards);
+    OmahaHiLow8_Best(hand, board, &hival, NULL, &hicards, &locards);
+
+    result_data[i] = hival;
+  }
+
+  return PyArray_Return(result);
+}
+
+
 static PyMethodDef base_methods[] = {
   { "eval_hand", (PyCFunction)eval_hand, METH_VARARGS | METH_KEYWORDS, doc_eval_hand },
   { "poker_eval", (PyCFunction)poker_eval, METH_VARARGS | METH_KEYWORDS, doc_poker_eval },
   { "evaln", (PyCFunction)poker_evaln, METH_VARARGS, doc_poker_evaln },
+  { "evaln_vector", (PyCFunction)poker_evaln_vector, METH_VARARGS, doc_poker_evaln_vector},
   { "string2card", (PyCFunction)string2card, METH_VARARGS, doc_string2card },
   { "card2string", (PyCFunction)card2string, METH_VARARGS, doc_card2string },
+  { "rank_suit_arr", (PyCFunction)rank_suit_arr, METH_VARARGS, doc_rank_suit_arr },
+  { "phs", (PyCFunction)phs, METH_VARARGS, doc_phs },
   {NULL, NULL, 0, NULL}
 };
 
@@ -1131,6 +1382,7 @@ static struct PyModuleDef moduledef = {
 	NULL
 };
 PyObject * VERSION_NAME(PyInit__pokereval_)(void) {
+  import_array();
   PyObject * module = PyModule_Create( &moduledef);
   if(module == NULL) return NULL;
   struct module_state *st = GETSTATE(module);
